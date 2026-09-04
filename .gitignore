@@ -1,0 +1,45 @@
+# Gitignore for a full-stack application
+
+# Node.js
+/node_modules
+/npm-debug.log*
+.env
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+.Python
+env/
+venv/
+/backend/.env
+
+# Angular
+/frontend/dist
+/frontend/.angular/cache
+
+# Docker
+*.log
+*.swp
+.docker/
+.idea/
+.vscode/
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# Database backups
+*.sql
+*.backup
+
+# IDE and OS specific files
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
