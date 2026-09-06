@@ -1,0 +1,8 @@
+<div class="shell">
+  <aside><a routerLink="/home" class="brand"><span>SA</span> Solvency AI</a><nav>
+    <a routerLink="/home" routerLinkActive="active">Overview</a>
+    <a routerLink="/resolution-plan/create" routerLinkActive="active">Resolution plans</a>
+    <a routerLink="/resolution-plan/validate" routerLinkActive="active">Validation</a>
+  </nav><div class="sidebar-foot"><span class="avatar">SD</span><div><strong>Shipra Dudeja</strong><small>Insolvency team</small></div><button (click)="signOut()" aria-label="Sign out">&#8594;</button></div></aside>
+  <main><header><span class="eyebrow">Insolvency workspace</span><div class="header-status"><i></i> Secure workspace</div></header><section class="content"><ng-content></ng-content></section></main>
+</div>

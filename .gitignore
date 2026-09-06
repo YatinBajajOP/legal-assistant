@@ -1,7 +1,7 @@
 # Gitignore for a full-stack application
 
 # Node.js
-/node_modules
+/frontend/node_modules
 /npm-debug.log*
 .env
 .DS_Store
