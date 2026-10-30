@@ -48,7 +48,14 @@ class QuestionGroup:
 
     @property
     def retrieval_query(self) -> str:
-        return "\n".join(node.get("question", "") for _, node in self.nodes)
+        queries = []
+        for _, node in self.nodes:
+            node_queries = node.get("retrieval_queries")
+            if isinstance(node_queries, list):
+                queries.extend(str(query) for query in node_queries if query)
+            elif node.get("question"):
+                queries.append(str(node["question"]))
+        return "\n".join(queries)
 
 
 def build_question_groups(nodes: List[FillableNode]) -> List[QuestionGroup]:

@@ -22,7 +22,7 @@ async def complete_json(*, system_prompt: str, user_prompt: str) -> Dict[str, An
             {"role": "user", "content": user_prompt},
         ],
         response_format={"type": "json_object"},
-        temperature=0,
+        temperature=0.1,
     )
     content = response.choices[0].message.content or "{}"
     return json.loads(content)

@@ -17,6 +17,9 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Tuple
 
 from docx import Document
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
 from docx.table import _Row
 
 
@@ -75,6 +78,15 @@ def _insert_run_after(paragraph, after_run, text: str, template_run=None):
     return new_run
 
 
+def _style_answer_run(run) -> None:
+    run.font.name = "Times New Roman"
+    run.italic = True
+    rpr = run._r.get_or_add_rPr()
+    rfonts = rpr.get_or_add_rFonts()
+    for attr in ("w:ascii", "w:hAnsi", "w:eastAsia", "w:cs"):
+        rfonts.set(qn(attr), "Times New Roman")
+
+
 def _write_formatted_text_to_paragraph(paragraph, text: str) -> None:
     """Render `text` into `paragraph`, converting **bold**/*italic* markdown into
     real run formatting instead of leaving literal asterisks, while reusing the
@@ -88,6 +100,7 @@ def _write_formatted_text_to_paragraph(paragraph, text: str) -> None:
     if not segments:
         return
 
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
     template_run = runs[0] if runs else None
     anchor = None
     for i, (seg_text, seg_bold, seg_italic) in enumerate(segments):
@@ -96,10 +109,8 @@ def _write_formatted_text_to_paragraph(paragraph, text: str) -> None:
             run.text = seg_text
         else:
             run = _insert_run_after(paragraph, anchor, seg_text, template_run)
-        if seg_bold:
-            run.bold = True
-        if seg_italic:
-            run.italic = True
+        _style_answer_run(run)
+        run.bold = seg_bold
         anchor = run
 
 
@@ -109,9 +120,12 @@ def _replace_token_preserve_runs(paragraph, token: str, replacement: str) -> Non
     into real Word formatting rather than literal asterisks."""
     replacement = "" if replacement is None else str(replacement)
     while token in paragraph.text:
+        paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
         runs = paragraph.runs
         if not runs:
             paragraph.text = paragraph.text.replace(token, replacement, 1)
+            for run in paragraph.runs:
+                _style_answer_run(run)
             return
 
         full = "".join(run.text for run in runs)
@@ -119,6 +133,8 @@ def _replace_token_preserve_runs(paragraph, token: str, replacement: str) -> Non
         if start < 0:
             # paragraph.text can include non-run constructs; conservative fallback.
             paragraph.text = paragraph.text.replace(token, replacement, 1)
+            for run in paragraph.runs:
+                _style_answer_run(run)
             return
         end = start + len(token)
 
@@ -136,6 +152,8 @@ def _replace_token_preserve_runs(paragraph, token: str, replacement: str) -> Non
                 last_i = i
         if first_i is None:
             paragraph.text = paragraph.text.replace(token, replacement, 1)
+            for run in paragraph.runs:
+                _style_answer_run(run)
             return
 
         first_run = runs[first_i]
@@ -148,9 +166,14 @@ def _replace_token_preserve_runs(paragraph, token: str, replacement: str) -> Non
         has_formatting = any(bold or italic for _, bold, italic in segments)
 
         if not has_formatting:
-            first_run.text = before + replacement + after
+            last_run = runs[last_i]
+            first_run.text = before
             for i in range(first_i + 1, last_i + 1):
                 runs[i].text = ""
+            answer_run = _insert_run_after(paragraph, first_run, replacement, first_run)
+            _style_answer_run(answer_run)
+            if after:
+                _insert_run_after(paragraph, answer_run, after, last_run)
             continue
 
         template_run = first_run
@@ -161,10 +184,8 @@ def _replace_token_preserve_runs(paragraph, token: str, replacement: str) -> Non
         anchor = first_run
         for seg_text, seg_bold, seg_italic in segments:
             new_run = _insert_run_after(paragraph, anchor, seg_text, template_run)
-            if seg_bold:
-                new_run.bold = True
-            if seg_italic:
-                new_run.italic = True
+            _style_answer_run(new_run)
+            new_run.bold = seg_bold
             anchor = new_run
         if after:
             _insert_run_after(paragraph, anchor, after, template_run)
@@ -217,6 +238,56 @@ def _replace_repeatable_rows(doc: Document, target: Dict[str, Any], items: list[
             if ci >= len(row.cells):
                 break
             _set_cell_text_preserve_format(row.cells[ci], item.get(key, ""))
+
+
+def _fit_oversized_tables_to_page(doc: Document) -> None:
+    usable_width = (
+        doc.sections[0].page_width
+        - doc.sections[0].left_margin
+        - doc.sections[0].right_margin
+    )
+    max_width_twips = int(usable_width / 635)
+
+    for table in doc.tables:
+        grid_columns = table._tbl.tblGrid.gridCol_lst
+        original_widths = [int(column.w / 635) for column in grid_columns]
+        total_width = sum(original_widths)
+        if not original_widths or total_width <= max_width_twips:
+            continue
+
+        widths_twips = [
+            int(width * max_width_twips / total_width)
+            for width in original_widths[:-1]
+        ]
+        widths_twips.append(max_width_twips - sum(widths_twips))
+        table.autofit = False
+        tbl_pr = table._tbl.tblPr
+        tbl_w = tbl_pr.find(qn("w:tblW"))
+        if tbl_w is None:
+            tbl_w = OxmlElement("w:tblW")
+            tbl_pr.append(tbl_w)
+        tbl_w.set(qn("w:type"), "dxa")
+        tbl_w.set(qn("w:w"), str(sum(widths_twips)))
+        tbl_indent = tbl_pr.find(qn("w:tblInd"))
+        if tbl_indent is not None:
+            tbl_pr.remove(tbl_indent)
+
+        for grid_col, width in zip(table._tbl.tblGrid.gridCol_lst, widths_twips):
+            grid_col.set(qn("w:w"), str(width))
+
+        for row in table._tbl.tr_lst:
+            column_index = 0
+            for cell in row.tc_lst:
+                tc_pr = cell.get_or_add_tcPr()
+                span = tc_pr.gridSpan.val if tc_pr.gridSpan is not None else 1
+                cell_width = sum(widths_twips[column_index : column_index + span])
+                tc_w = tc_pr.find(qn("w:tcW"))
+                if tc_w is None:
+                    tc_w = OxmlElement("w:tcW")
+                    tc_pr.append(tc_w)
+                tc_w.set(qn("w:type"), "dxa")
+                tc_w.set(qn("w:w"), str(cell_width))
+                column_index += span
 
 
 def validate_json_against_template(data: Dict[str, Any], template_path: str | Path) -> list[str]:
@@ -281,6 +352,7 @@ def generate_resolution_plan(json_path: str | Path, template_path: str | Path, o
             raise TypeError(f"Repeatable table value must be a list, got {type(value).__name__}")
         _replace_repeatable_rows(doc, target, value)
 
+    _fit_oversized_tables_to_page(doc)
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(out))

@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.db.models.document import DocumentChunk
 from app.repositories import chunk_repository
-from app.services.embeddings import embed_query
+from app.services.embeddings import embed_texts
 from app.services.llm_client import complete_json
 from app.services.resolution_plan.template_engine import (
     QuestionGroup,
@@ -35,7 +35,8 @@ _SYSTEM_PROMPT = """You are a legal analyst assistant answering structured quest
 * Client instructions below are **mandatory requirements**. Check the provided documents against them, but **do not treat the instruction itself as evidence that the requirement is satisfied**.
 * Flag contradictions or clauses inconsistent with these requirements only when supported by the provided context.
 * Preserve exact clause numbers, page numbers, dates, amounts, names, and defined terms from the source.
-* Definitions must follow the RFRP definitions.
+* Distinguish the uploaded RFRP from the Resolution Plan by source filename/type and content. For RFRP checks, use RFRP excerpts to state the requirement and Plan/annexure excerpts to establish the response. Never treat static checklist particulars as evidence.
+* Definitions must follow the uploaded RFRP when it is present in the supplied excerpts; if it is absent, do not assume its definition.
 * No contradictory or conditional clauses should exist.
 * Resolution Plan amount must not be reduced under any condition.
 * Net-worth certificate must be provided and demonstrate liquidity.
@@ -70,21 +71,50 @@ def _format_context(chunks: Sequence[DocumentChunk]) -> str:
         if chunk.clause_reference:
             location.append(f"Clause {chunk.clause_reference}")
         location_str = ", ".join(location) if location else "Location unknown"
-        parts.append(f"[{location_str}]\n{chunk.content}")
+        document = chunk.document
+        source_details = []
+        if document.original_filename:
+            source_details.append(document.original_filename)
+        if document.document_type:
+            source_details.append(document.document_type)
+        source_str = ", ".join(source_details) if source_details else "Source document"
+        parts.append(f"[Source: {source_str}; {location_str}]\n{chunk.content}")
     return "\n\n---\n\n".join(parts)
 
 
 async def _retrieve_context(
     db: AsyncSession, group: QuestionGroup, document_ids: Sequence[uuid.UUID], user_id: int
 ) -> List[DocumentChunk]:
-    query_embedding = await embed_query(group.retrieval_query)
-    return await chunk_repository.similarity_search(
-        db,
-        query_embedding=query_embedding,
-        document_ids=document_ids,
-        user_id=user_id,
-        top_k=settings.RETRIEVAL_TOP_K,
-    )
+    query_texts = []
+    for _, node in group.nodes:
+        node_queries = node.get("retrieval_queries")
+        if isinstance(node_queries, list):
+            query_texts.extend(str(query) for query in node_queries if query)
+        elif node.get("question"):
+            query_texts.append(str(node["question"]))
+    if not query_texts:
+        query_texts = [group.retrieval_query]
+
+    embeddings = await embed_texts(query_texts)
+    per_query_top_k = settings.RETRIEVAL_TOP_K if len(query_texts) == 1 else min(3, settings.RETRIEVAL_TOP_K)
+    unique_chunks: List[DocumentChunk] = []
+    seen_ids = set()
+    max_chunks = max(settings.RETRIEVAL_TOP_K * 6, 48)
+    for embedding in embeddings:
+        result = await chunk_repository.similarity_search(
+            db,
+            query_embedding=embedding,
+            document_ids=document_ids,
+            user_id=user_id,
+            top_k=per_query_top_k,
+        )
+        for chunk in result:
+            if chunk.id not in seen_ids:
+                seen_ids.add(chunk.id)
+                unique_chunks.append(chunk)
+                if len(unique_chunks) >= max_chunks:
+                    return unique_chunks
+    return unique_chunks
 
 
 def _build_scalar_prompt(group: QuestionGroup, context: str, llm_instructions: List[str]) -> str:
@@ -119,10 +149,13 @@ Source excerpts (Resolution Plan and related documents):
 
 Task: {node.get("question", "")}
 
+Checklist items to assess individually:
+{chr(10).join(f'- {query}' for query in node.get("retrieval_queries", []))}
+
 Respond with a JSON object of exactly this shape:
 {{"answers": {{"items": [{{{", ".join(f'"{k}": "..."' for k in column_keys)}}}, ...]}}}}
 If no items are supported by the excerpts, return {{"answers": {{"items": []}}}}.
-Do not fabricate rows; only include items clearly supported by the source excerpts.
+Do not fabricate rows; only include items clearly supported by the source excerpts. When checklist items are supplied, return exactly one row per item, using its label in `relevant_clause_no`; put evidence citations/extracts in `relevant_extract` and the supported finding/gap in `remarks`. Return `--`/Not provided when evidence is missing; do not omit a checklist item just because evidence is missing.
 """
 
 

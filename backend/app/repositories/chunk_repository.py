@@ -3,6 +3,7 @@ from typing import Sequence
 
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.db.models.document import DocumentChunk
 
@@ -35,6 +36,7 @@ async def similarity_search(
             DocumentChunk.user_id == user_id,
             DocumentChunk.embedding.isnot(None),
         )
+        .options(selectinload(DocumentChunk.document))
         .order_by(DocumentChunk.embedding.cosine_distance(query_embedding))
         .limit(top_k)
     )
